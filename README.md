@@ -42,4 +42,3 @@ Outputs: flagged claims CSV, agent risk scorecard, executive summary, and charts
 
 
 
-Want me to save this as a `README.md` file in the project, or is pasting it into GitHub directly enough? I can also add a project-structure tree if you want it slightly more complete.
