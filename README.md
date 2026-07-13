@@ -1,41 +1,119 @@
-# Insurance Claim Fraud Risk Analytics
+"""
+scoring.py
+----------
+Turns two independent anomaly scores + one hard rule into a single,
+business-usable output: a confidence tier per claim, plus portfolio-level
+financial exposure metrics that translate the model's output into numbers
+a risk/audit team actually cares about.
 
-An end-to-end **unsupervised fraud detection pipeline** for insurance claims that flags high-risk claims for investigation, quantifies dollar exposure, and produces an agent-level risk scorecard for internal audit teams.
+Confidence tiers (used instead of a single boolean is_anomaly flag):
+  - CRITICAL : hard collusion rule fired (shared bank account, shared
+               address, or shared last name between agent and customer).
+               Always investigate regardless of model scores.
+  - HIGH     : both the autoencoder AND the isolation forest flag the
+               claim in their respective top percentile.
+  - MEDIUM   : exactly one of the two models flags the claim.
+  - LOW      : neither model flags the claim.
+"""
 
-## Problem
+import numpy as np
+import pandas as pd
 
-Insurance carriers process thousands of claims with no reliable way to know which ones deserve a closer look — and audit teams can't review everything. This project ranks claims by risk and quantifies the dollar exposure in each risk tier, rather than producing a simple flagged/not-flagged label.
-
-## Approach
-
-- **Dual independent models** — a deep autoencoder and an Isolation Forest run separately. With no ground-truth fraud label in the data, *agreement between the two models* serves as the confidence signal in place of labeled validation.
-- **Hard collusion rules** — claims where an agent and customer share a bank account, address, or surname are force-flagged regardless of model scores.
-- **Business translation** — flags roll up into dollar exposure by risk tier and an agent-level scorecard, so the output is "which agents to investigate first," not just a list of suspicious rows.
-
-Claims are bucketed into four tiers: **CRITICAL** (collusion rule fired), **HIGH** (both models agree), **MEDIUM** (one model flags), **LOW** (neither).
-
-## Key Results
-
-Run against a 10,000-claim / $165.6M portfolio:
-
-- **738 claims (7.4%)** flagged, representing **$11.2M (6.8%)** of total exposure
-- **12 CRITICAL collusion cases** surfaced independent of model scoring
-- High-risk-segment customers flagged at **9.8%** vs. 7.4% portfolio average
-
-
-**Honest negative finding:** the model is *not* just a large-claims detector — reviewing the top 5% of claims by risk score captures only ~5% of dollar value, no better than random. It catches structurally unusual claims rather than large ones.
+DEFAULT_PERCENTILE = 95
 
 
-## Tech Stack
+def add_percentile_flags(
+    df: pd.DataFrame,
+    ae_score: np.ndarray,
+    iso_score: np.ndarray,
+    percentile: int = DEFAULT_PERCENTILE,
+) -> pd.DataFrame:
+    df = df.copy()
+    df["autoencoder_score"] = ae_score
+    df["isolation_forest_score"] = iso_score
 
-Python · pandas · scikit-learn (Isolation Forest) · TensorFlow/Keras (autoencoder) · matplotlib
+    ae_threshold = np.percentile(ae_score, percentile)
+    iso_threshold = np.percentile(iso_score, percentile)
 
-## Running It
+    df["ae_flag"] = df["autoencoder_score"] > ae_threshold
+    df["iso_flag"] = df["isolation_forest_score"] > iso_threshold
 
-```bash
-pip install -r requirements.txt
-python run_analysis.py                 # defaults to 95th percentile threshold
-python run_analysis.py --percentile 90 # widen the net
-```
+    model_agreement = df["ae_flag"].astype(int) + df["iso_flag"].astype(int)
 
-Outputs: flagged claims CSV, agent risk scorecard, executive summary, and charts — all written to `outputs/`.
+    conditions = [
+        df["HARD_COLLUSION_FLAG"] == 1,
+        model_agreement == 2,
+        model_agreement == 1,
+    ]
+    choices = ["CRITICAL", "HIGH", "MEDIUM"]
+    df["confidence_tier"] = np.select(conditions, choices, default="LOW")
+
+    df["is_flagged"] = df["confidence_tier"] != "LOW"
+
+    # A single normalized 0-1 composite score, handy for sorting/reporting.
+    ae_norm = (df["autoencoder_score"] - ae_score.min()) / (
+        ae_score.max() - ae_score.min()
+    )
+    iso_norm = (df["isolation_forest_score"] - iso_score.min()) / (
+        iso_score.max() - iso_score.min()
+    )
+    df["composite_score"] = (ae_norm + iso_norm) / 2
+
+    return df
+
+
+def business_impact_summary(df: pd.DataFrame) -> dict:
+    total_claims = len(df)
+    total_value = df["CLAIM_AMOUNT"].sum()
+
+    flagged = df[df["is_flagged"]]
+    flagged_value = flagged["CLAIM_AMOUNT"].sum()
+
+    tier_counts = df["confidence_tier"].value_counts().to_dict()
+    tier_value = flagged.groupby("confidence_tier")["CLAIM_AMOUNT"].sum().to_dict()
+
+    by_risk_segment = (
+        df.groupby("RISK_SEGMENTATION")["is_flagged"].mean().sort_values(ascending=False)
+    )
+    by_insurance_type = (
+        df.groupby("INSURANCE_TYPE")["is_flagged"].mean().sort_values(ascending=False)
+    )
+
+    summary = {
+        "total_claims": total_claims,
+        "total_portfolio_value": total_value,
+        "flagged_claim_count": len(flagged),
+        "flagged_claim_pct": len(flagged) / total_claims,
+        "flagged_dollar_value": flagged_value,
+        "flagged_dollar_pct": flagged_value / total_value,
+        "tier_counts": tier_counts,
+        "tier_dollar_value": tier_value,
+        "flag_rate_by_risk_segment": by_risk_segment.to_dict(),
+        "flag_rate_by_insurance_type": by_insurance_type.to_dict(),
+    }
+    return summary
+
+
+def agent_risk_scorecard(df: pd.DataFrame, min_claims: int = 5) -> pd.DataFrame:
+    """
+    Aggregates claim-level flags up to the agent level. This is the view an
+    internal investigations team would actually act on: which agents show a
+    disproportionate rate of flagged claims, not just which individual
+    claims look odd.
+    """
+    grouped = df.groupby("AGENT_ID").agg(
+        total_claims=("TRANSACTION_ID", "count"),
+        flagged_claims=("is_flagged", "sum"),
+        critical_flags=("confidence_tier", lambda s: (s == "CRITICAL").sum()),
+        total_claim_value=("CLAIM_AMOUNT", "sum"),
+        flagged_claim_value=(
+            "CLAIM_AMOUNT",
+            lambda s: s[df.loc[s.index, "is_flagged"]].sum(),
+        ),
+        avg_composite_score=("composite_score", "mean"),
+    )
+    grouped["flag_rate"] = grouped["flagged_claims"] / grouped["total_claims"]
+    grouped = grouped[grouped["total_claims"] >= min_claims]
+    return grouped.sort_values(
+        ["critical_flags", "flag_rate"], ascending=False
+    )

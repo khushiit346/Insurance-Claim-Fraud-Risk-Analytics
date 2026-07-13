@@ -1,0 +1,6 @@
+{
+  "percentile_threshold": 95,
+  "total_claims": 10000,
+  "flagged_claim_count": 738,
+  "flagged_dollar_value": 11244300.0
+}

@@ -1,0 +1,115 @@
+# Insurance Claim Fraud Risk Analytics
+
+**An unsupervised anomaly-detection pipeline that flags high-risk insurance claims for investigation, quantifies dollar exposure, and produces an agent-level risk scorecard for internal audit.**
+
+---
+
+## 1. Business Problem
+
+Insurance carriers process thousands of claims with no reliable way to know, in advance, which ones deserve a closer look. Manual audit teams have limited capacity — they can't review every claim, so they need a way to **rank** claims by risk and **quantify** how much dollar exposure sits in the highest-risk tier, rather than a simple thumbs up / thumbs down per claim.
+
+This project simulates that workflow end-to-end: ingest claim, agent, and vendor records → engineer red-flag features → score every claim with two independent unsupervised models → roll the results up into a business-usable risk report.
+
+## 2. Data
+
+Three synthetic tables (10,000 claims / 1,200 agents / 600 vendors):
+
+| Table | Rows | Key fields |
+|---|---|---|
+| `insurance_data.csv` | 10,000 | claim amount, premium, policy/loss/report dates, risk segmentation, agent & vendor IDs |
+| `employee_data.csv` | 1,200 | agent address, routing/account number |
+| `vendor_data.csv` | 600 | vendor address |
+
+No fraud label exists in the data — this is intentionally treated as an **unsupervised** problem, the way it actually looks in practice before a case has been confirmed.
+
+## 3. Methodology
+
+**Feature engineering**
+- Timing gaps: days between policy start → loss, and loss → report
+- Collusion signals between agent and customer: shared postal code, shared street address, shared bank account, shared last name
+- Collusion signals involving the vendor: agent-vendor shared zip, customer-vendor shared zip
+- Monetary fields (`CLAIM_AMOUNT`, `PREMIUM_AMOUNT`) are log-transformed before scaling — both are heavily right-skewed (claims range $100–$100,000), and feeding that straight into a `StandardScaler` lets a handful of large claims dominate the model.
+
+**Scoring — two independent models, not one**
+
+There's no ground-truth label to validate against, so a single model's output can't be checked for precision/recall. Instead, two structurally different unsupervised models are run independently, and **agreement between them** is used as the confidence signal:
+
+- A **deep autoencoder** (32→16→8→16→32), trained on an 80% random sample and scored against the full dataset, flagged by reconstruction-error percentile.
+- An **Isolation Forest**, trained independently on the same feature matrix.
+
+Claims are bucketed into four **priority tiers**:
+
+| Tier | Trigger |
+|---|---|
+| **CRITICAL** | A hard collusion rule fired (shared bank account, address, or last name between agent & customer) — investigate regardless of model scores |
+| **HIGH** | Both models independently flagged the claim |
+| **MEDIUM** | Exactly one model flagged the claim |
+| **LOW** | Neither model flagged the claim |
+
+## 4. Key Findings
+
+Run against the 10,000-claim / $165.6M portfolio at a 95th-percentile threshold:
+
+- **738 claims (7.4%)** were flagged across all tiers, representing **$11.2M (6.8%)** of total portfolio value.
+- **12 CRITICAL claims** — real agent–customer collusion matches (shared bank account, address, or surname) — worth $275K. These should be the first cases opened regardless of anything else in the model.
+- **High-risk-segment customers are flagged at 9.8%**, vs. 7.4% portfolio average — the model is picking up a real, sensible pattern rather than noise.
+- The agent scorecard surfaces **individual agents with outsized flag rates** (up to 23%, vs. ~7% average) — exactly the view an internal investigations team would act on, as opposed to a flat list of 730 claims with no owner.
+
+![Confidence tiers](outputs/charts/02_confidence_tiers.png)
+![Flag rate by risk segment](outputs/charts/03_flag_rate_by_risk_segment.png)
+![Top agents](outputs/charts/06_top_agents_scorecard.png)
+
+### An honest negative result
+
+The Pareto chart below plots cumulative dollar value captured as you review claims in risk-score order. A model that mainly targets *big* claims would bow sharply above the diagonal early on. It doesn't:
+
+![Dollar exposure pareto](outputs/charts/05_dollar_exposure_pareto.png)
+
+This says something specific: **the model is not simply a large-claims detector.** Reviewing the top 5% of claims by risk score captures roughly 5% of total dollar value — no better than reviewing a random 5%. It's catching claims that are *structurally unusual* (odd combinations of timing, segment, relationships) rather than claims that are *large*. For an audit team, that's a feature, not a bug — a large-claims filter is trivial to build without any of this; the value of this pipeline is in the pattern-based signal, not dollar-sorting. It's called out here rather than glossed over because a resume-ready analysis should say what a model *doesn't* do as clearly as what it does.
+
+## 5. Bugs Fixed From the Original Notebook
+
+This project started as a Colab notebook that crashed on a relative file path. Beyond that, two silent (non-crashing) issues were found and fixed:
+
+1. **The bank-account collusion rule never fired** — 0 out of 10,000 claims matched, on the original single feature. It's kept, but is no longer the *only* collusion signal; address-match and surname-match were added and both fire on real (if rare) cases.
+2. **Vendor postal code was merged into the dataset but never used** — it was joined in, then dropped without ever being compared to anything. Two new features (`AGENT_VENDOR_SAME_ZIP`, `CUSTOMER_VENDOR_SAME_ZIP`) now use it.
+
+Also fixed: no random seed (results weren't reproducible run-to-run), the autoencoder was trained and scored on the exact same rows with no held-out portion, and skewed monetary features went into a linear scaler untransformed.
+
+## 6. Limitations
+
+- **No ground-truth fraud label exists in this dataset.** Model agreement is a reasonable substitute for validation, not a replacement for it. In production, flagged claims would need a feedback loop (confirmed fraud / false positive) to actually measure precision.
+- **Synthetic data.** Distributions and correlations were generated, not observed — the *pipeline design* is the transferable part, not these specific percentages.
+- **The 95th-percentile threshold is a starting point, not a validated cutoff.** In practice, it should be set by audit team capacity ("we can review N claims/week") rather than a fixed statistical rule.
+
+## 7. Project Structure
+
+```
+fraud_project/
+├── data/                     # raw CSVs (not tracked if private)
+├── src/
+│   ├── data_pipeline.py      # load, merge, feature engineering
+│   ├── modeling.py           # autoencoder + isolation forest
+│   ├── scoring.py            # tiering + business impact metrics
+│   └── visualize.py          # chart generation
+├── run_analysis.py           # main entry point
+├── outputs/
+│   ├── flagged_claims.csv
+│   ├── agent_risk_scorecard.csv
+│   ├── executive_summary.md
+│   └── charts/
+├── requirements.txt
+└── README.md
+```
+
+## 8. Running It
+
+```bash
+pip install -r requirements.txt
+python run_analysis.py                       # defaults to 95th percentile
+python run_analysis.py --percentile 90       # widen the net
+```
+
+## 9. Skills Demonstrated
+
+Data merging & feature engineering (pandas) · unsupervised anomaly detection (Keras autoencoder, scikit-learn Isolation Forest) · model-agreement-based validation in the absence of ground truth · business-impact translation (dollar exposure, tiered prioritization, agent scorecards) · reproducible pipeline design · critical evaluation of model limitations.

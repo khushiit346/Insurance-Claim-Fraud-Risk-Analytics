@@ -1,0 +1,49 @@
+# Insurance Claim Fraud Detection — Executive Summary
+
+An unsupervised anomaly-detection pipeline (deep autoencoder + Isolation Forest, cross-validated against each other, plus three hard-coded collusion rules) was run against **10,000 claims** worth **$165,638,300** in total exposure.
+
+## Headline numbers
+
+- **738 claims (7.4% of volume)** were flagged for review.
+- Those claims represent **$11,244,300** in exposure — **6.8%** of total portfolio dollar value.
+
+## Priority tiers
+
+| Tier | Claims | Dollar Value | Trigger |
+|---|---|---|---|
+| CRITICAL | 12 | $275,000 | Hard collusion rule fired (shared bank account, address, or last name between agent & customer) |
+| HIGH | 259 | $4,292,400 | Both models (autoencoder + isolation forest) independently flagged this claim |
+| MEDIUM | 467 | $6,676,900 | Exactly one model flagged this claim |
+| LOW | 9,262 | $0 | Not flagged |
+
+## Where the risk concentrates
+
+**Flag rate by risk segmentation:**
+
+- H: 9.8%
+- M: 7.0%
+- L: 6.9%
+
+**Flag rate by insurance type:**
+
+- Mobile: 10.8%
+- Motor: 8.2%
+- Health: 6.6%
+- Property: 6.4%
+- Life: 6.4%
+- Travel: 5.9%
+
+## Top agents to investigate
+
+| Agent ID | Claims | Flagged | Critical Flags | Flag Rate | Flagged $ |
+|---|---|---|---|---|---|
+| AGENT00873 | 13 | 3 | 1 | 23.1% | $15,200 |
+| AGENT00168 | 9 | 2 | 1 | 22.2% | $44,000 |
+| AGENT00357 | 11 | 2 | 1 | 18.2% | $45,000 |
+| AGENT01019 | 11 | 2 | 1 | 18.2% | $8,000 |
+| AGENT00880 | 6 | 1 | 1 | 16.7% | $1,000 |
+| AGENT00121 | 7 | 1 | 1 | 14.3% | $19,000 |
+| AGENT00755 | 9 | 1 | 1 | 11.1% | $7,000 |
+| AGENT00067 | 10 | 1 | 1 | 10.0% | $30,000 |
+| AGENT00115 | 10 | 1 | 1 | 10.0% | $20,000 |
+| AGENT00419 | 10 | 1 | 1 | 10.0% | $63,000 |
